@@ -48,6 +48,8 @@ PATRON_HIGHLIGHT = re.compile(r"^Highlight - (?P<mo>\d{2})-(?P<d>\d{2})-(?P<y>\d
 PATRON_OBS = re.compile(
     r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2}) (?P<h>\d{2})-(?P<mi>\d{2})-(?P<s>\d{2})$"
 )
+# o forte leva - repo / oxe menina - dbd (nome escolhido à mão: o jogo vem depois do último " - ")
+PATRON_NOMBRE_JUEGO = re.compile(r"^(?P<nombre>.+) - (?P<juego>[^-]*[^\W\d_][^-]*)$")
 
 
 @dataclass
@@ -57,11 +59,14 @@ class Clip:
     juego: str
     playlist: str
     fecha: datetime
-    origen: str  # shadowplay / medal / obs / discord / highlight / sem_padrao
+    origen: str  # shadowplay / medal / obs / discord / highlight / nome_jogo / sem_padrao
     titulo: str = ""
+    nombre_propio: str = ""  # título escolhido no nome do arquivo (se tiver)
 
     @property
     def titulo_base(self) -> str:
+        if self.nombre_propio:
+            return self.nombre_propio[:100]  # limite de título do YouTube
         nombre = TITULO_OBS if self.playlist == PLAYLIST_OBS else self.juego
         return f"{nombre} - {self.fecha:%Y-%m-%d %H.%M}"
 
@@ -91,6 +96,7 @@ def _normalizar(juego: str) -> str:
 def _analizar(ruta: Path, tamano: int, raiz: Path) -> Clip:
     nombre = ruta.stem
     playlist = None
+    nombre_propio = ""
 
     if m := PATRON_SHADOWPLAY.match(nombre):
         juego = m["juego"] or ""
@@ -113,6 +119,11 @@ def _analizar(ruta: Path, tamano: int, raiz: Path) -> Clip:
         juego = _carpeta_como_juego(ruta, raiz)
         fecha = datetime(int(m["y"]), int(m["mo"]), int(m["d"]), int(m["h"]), int(m["mi"]))
         origen = "highlight"
+    elif m := PATRON_NOMBRE_JUEGO.match(nombre):
+        juego = m["juego"]
+        nombre_propio = nombre.strip()
+        fecha = datetime.fromtimestamp(ruta.stat().st_mtime).replace(microsecond=0)
+        origen = "nome_jogo"
     else:
         juego = _carpeta_como_juego(ruta, raiz)
         fecha = datetime.fromtimestamp(ruta.stat().st_mtime).replace(microsecond=0)
@@ -121,7 +132,7 @@ def _analizar(ruta: Path, tamano: int, raiz: Path) -> Clip:
     juego = _normalizar(juego)
     if _es_historico(ruta):
         juego, playlist = DESCONOCIDO, PLAYLIST_HISTORICOS
-    return Clip(ruta, tamano, juego, playlist or juego, fecha, origen)
+    return Clip(ruta, tamano, juego, playlist or juego, fecha, origen, nombre_propio=nombre_propio)
 
 
 def _unificar_mayusculas(clips: list[Clip]) -> None:

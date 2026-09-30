@@ -94,6 +94,7 @@ Se você ativar essa opção, o programa apaga o original quando o YouTube termi
 ## Como as playlists são escolhidas
 
 - **ShadowPlay** (`Jogo_2024.02.29-12.04.mp4`) e **Medal** (`MedalTVJogo20250206162129.mp4`): o jogo vem do nome do arquivo.
+- **Nome escolhido por você** (`o forte leva - repo.mp4`, `oxe menina - dbd.mp4`): o jogo é o que vem depois do último ` - `, e cada jogo ganha a sua playlist com esse nome (`repo`, `dbd`...). O título no YouTube é o nome do arquivo inteiro (`o forte leva - repo`), e a data vem da data de modificação.
 - **Highlights** e arquivos sem padrão: o jogo vem do nome da pasta onde o clip está.
 - **Discord** (`Jogo_<código>.mp4`): o jogo vem do nome do arquivo e a data, da data de modificação.
 - **OBS** (`2025-06-09 08-34-02.mkv`): vão para a playlist **Gravações OBS**.
