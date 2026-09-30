@@ -22,6 +22,7 @@ ALIAS = {
     "": DESCONOCIDO,
     "unknown": DESCONOCIDO,
     "replay": DESCONOCIDO,
+    "desktop": DESCONOCIDO,
     "no man_s sky": "No Man's Sky",
     "overwatch": "Overwatch 2",
 }
@@ -36,6 +37,12 @@ CARPETAS_GENERICAS = {
 PATRON_SHADOWPLAY = re.compile(
     r"^(?:(?P<juego>.*?)_)?(?:replay_)?"
     r"(?P<y>\d{4})\.(?P<mo>\d{2})\.(?P<d>\d{2})-(?P<h>\d{2})\.(?P<mi>\d{2})(?:_\d+)?$",
+    re.IGNORECASE,
+)
+# App da NVIDIA: Overwatch 2 2026.09.25 - 22.33.44.02.DVR (replay) / Overwatch 2 2026.09.25 - 22.33.44.02 (gravação)
+PATRON_NVIDIA_APP = re.compile(
+    r"^(?P<juego>.*?) ?(?P<y>\d{4})\.(?P<mo>\d{2})\.(?P<d>\d{2}) - "
+    r"(?P<h>\d{2})\.(?P<mi>\d{2})\.(?P<s>\d{2})(?:\.\d+)?(?:\.DVR)?$",
     re.IGNORECASE,
 )
 # MedalTVMinecraft20250206162129
@@ -59,7 +66,7 @@ class Clip:
     juego: str
     playlist: str
     fecha: datetime
-    origen: str  # shadowplay / medal / obs / discord / highlight / nome_jogo / sem_padrao
+    origen: str  # shadowplay / nvidia_app / medal / obs / discord / highlight / nome_jogo / sem_padrao
     titulo: str = ""
     nombre_propio: str = ""  # título escolhido no nome do arquivo (se tiver)
 
@@ -102,6 +109,10 @@ def _analizar(ruta: Path, tamano: int, raiz: Path) -> Clip:
         juego = m["juego"] or ""
         fecha = datetime(int(m["y"]), int(m["mo"]), int(m["d"]), int(m["h"]), int(m["mi"]))
         origen = "shadowplay"
+    elif m := PATRON_NVIDIA_APP.match(nombre):
+        juego = m["juego"] or _carpeta_como_juego(ruta, raiz)
+        fecha = datetime(int(m["y"]), int(m["mo"]), int(m["d"]), int(m["h"]), int(m["mi"]), int(m["s"]))
+        origen = "nvidia_app"
     elif m := PATRON_MEDAL.match(nombre):
         juego = _carpeta_como_juego(ruta, raiz) or m["juego"]
         fecha = datetime.strptime(m["ts"], "%Y%m%d%H%M%S")
