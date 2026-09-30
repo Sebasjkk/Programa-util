@@ -1,0 +1,16 @@
+# Acesso ao canal: NUNCA publicar
+client_secret*.json
+token.json
+
+# Dados locais do programa
+config.json
+estado.db
+manifesto.csv
+*.log
+*.lock
+
+# Python / PyInstaller
+__pycache__/
+build/
+dist/
+*.spec
