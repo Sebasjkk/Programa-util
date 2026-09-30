@@ -55,7 +55,8 @@ LOCK = CARPETA_PROGRAMA / "enviar.lock"
 CLIENT_SECRET = CARPETA_PROGRAMA / "client_secret.json"
 TOKEN = CARPETA_PROGRAMA / "token.json"
 
-PRIVACIDAD = "private"
+# Não listado: não aparece no canal nem na busca, mas quem tiver o link consegue ver.
+PRIVACIDAD = "unlisted"
 CATEGORIA_GAMING = "20"
 
 # Limite de videos.insert por projeto (desde junho de 2026). Se o Google aumentar a cota, mudar aqui.

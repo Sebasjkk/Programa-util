@@ -2,7 +2,7 @@
 
 Envia automaticamente os seus clips de jogos (ShadowPlay, Medal, OBS, Discord, Highlights) para o seu canal do YouTube:
 
-- Todos os vídeos vão como **privados**.
+- Todos os vídeos vão como **não listados**: não aparecem no canal nem na busca, mas quem tiver o link consegue ver. As playlists também.
 - Cada jogo ganha a sua **playlist**.
 - Os títulos ficam assim: `League of Legends - 2024-02-29 12.04`.
 - Nada é enviado duas vezes: o programa confere o que já está no canal.
@@ -43,7 +43,7 @@ O programa precisa de um arquivo `client_secret.json`, que dá acesso ao **seu**
 ## 3. Ajustes no YouTube (recomendado)
 
 - Verifique o canal com o seu celular em <https://www.youtube.com/verify>. Assim o limite diário para envios manuais fica alto.
-- No YouTube Studio, vá em **Configurações → Padrões de upload** e coloque visibilidade **Privado** e categoria **Jogos**. Assim os vídeos que você enviar à mão ficam iguais aos enviados pelo programa.
+- No YouTube Studio, vá em **Configurações → Padrões de upload** e coloque visibilidade **Não listado** e categoria **Jogos**. Assim os vídeos que você enviar à mão ficam iguais aos enviados pelo programa.
 
 ## 4. Primeiro uso
 
@@ -131,13 +131,13 @@ No `config.json`, as barras vão dobradas (`\\`).
 
 ## Linha de comando
 
-Também dá para usar pelo terminal:
+Também dá para usar pelo terminal, dentro da pasta do programa. No PowerShell, o nome vai com `.\` na frente:
 
 ```
-enviar_clips.exe status
-enviar_clips.exe enviar --limite 1       # envia um só (bom para testar)
-enviar_clips.exe enviar --dry-run        # mostra o que enviaria, sem enviar nada
-enviar_clips.exe enviar --repetir-erros  # tenta de novo os que deram erro
+.\enviar_clips.exe status
+.\enviar_clips.exe enviar --limite 1       # envia um só (bom para testar)
+.\enviar_clips.exe enviar --dry-run        # mostra o que enviaria, sem enviar nada
+.\enviar_clips.exe enviar --repetir-erros  # tenta de novo os que deram erro
 ```
 
 Para rodar a partir do código-fonte, instale o Python 3.10 ou mais novo e rode:
