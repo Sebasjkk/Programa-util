@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --onefile --name enviar_clips enviar_clips.py
+      - run: pyinstaller --onefile --windowed --name enviar_clips enviar_clips.py
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/enviar_clips.exe

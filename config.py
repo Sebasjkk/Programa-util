@@ -38,10 +38,10 @@ def carregar():
     PASTA_HISTORICOS = dados.get("pasta_historicos", "").strip().lower()
 
 
-def salvar(clips: Path, apagar_originais: bool):
-    """Grava a pasta dos clips e a opção de apagar, mantendo as outras chaves do config.json."""
+def salvar(**cambios):
+    """Grava as chaves indicadas (ex.: clips=Path(...), apagar_originais=True), mantendo as outras."""
     dados = _ler()
-    dados.update({"clips": str(clips), "apagar_originais": apagar_originais})
+    dados.update({clave: str(v) if isinstance(v, Path) else v for clave, v in cambios.items()})
     CONFIG.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
     carregar()
 
@@ -57,6 +57,7 @@ TOKEN = CARPETA_PROGRAMA / "token.json"
 
 # Não listado: não aparece no canal nem na busca, mas quem tiver o link consegue ver.
 PRIVACIDAD = "unlisted"
+URL_AJUDA = "https://github.com/Sebasjkk/Programa-util#readme"
 CATEGORIA_GAMING = "20"
 
 # Limite de videos.insert por projeto (desde junho de 2026). Se o Google aumentar a cota, mudar aqui.

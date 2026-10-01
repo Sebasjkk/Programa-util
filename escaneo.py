@@ -100,8 +100,13 @@ def _normalizar(juego: str) -> str:
     return ALIAS.get(juego.lower(), juego)
 
 
-def _analizar(ruta: Path, tamano: int, raiz: Path) -> Clip:
-    nombre = ruta.stem
+def previa(ruta: Path, nombre_nuevo: str, raiz: Path) -> Clip:
+    """Como ficaria o clip se o arquivo se chamasse `nombre_nuevo` (sem extensão)."""
+    return _analizar(ruta, 0, raiz, nombre_nuevo)
+
+
+def _analizar(ruta: Path, tamano: int, raiz: Path, nombre: str | None = None) -> Clip:
+    nombre = ruta.stem if nombre is None else nombre
     playlist = None
     nombre_propio = ""
 
@@ -151,7 +156,9 @@ def _unificar_mayusculas(clips: list[Clip]) -> None:
     variantes = defaultdict(Counter)
     for c in clips:
         variantes[c.juego.lower()][c.juego] += 1
-    elegido = {clave: cont.most_common(1)[0][0] for clave, cont in variantes.items()}
+    # Em caso de empate, ganha a grafia com maiúsculas ("Valorant" e não "valorant").
+    elegido = {clave: max(cont.items(), key=lambda v: (v[1], v[0] != v[0].lower()))[0]
+               for clave, cont in variantes.items()}
     for c in clips:
         nuevo = elegido[c.juego.lower()]
         if c.playlist == c.juego:

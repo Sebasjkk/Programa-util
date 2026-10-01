@@ -1,7 +1,7 @@
 """Envia os clips de jogos para o YouTube (uma playlist por jogo), coordenando o envio
 automático pela API (100 por dia) com envios manuais pelo YouTube Studio.
 
-Comandos:
+Com clique duplo abre a janela. Pelo terminal (no PowerShell, termine com | Out-Host):
     enviar_clips configurar     escolhe a pasta dos clips e as opções
     enviar_clips escanear       monta a lista de vídeos e o manifesto.csv
     enviar_clips preparar       cria a pasta de trabalho com hardlinks renomeados
@@ -15,7 +15,9 @@ import csv
 import filecmp
 import logging
 import os
+import subprocess
 import sys
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,18 +31,34 @@ from estado import EN_PLAYLIST, ERROR, PENDIENTE, RESERVADO_API, SUBIDO
 
 log = logging.getLogger("enviar_clips")
 
+# A janela troca AL_PROGRESAR para mostrar a barra de progresso e usa PARAR para o botão Parar.
+AL_PROGRESAR = None
+PARAR = threading.Event()
 
-def _configurar_log():
+
+class Interrumpido(Exception):
+    """O usuário apertou Parar no meio de um envio."""
+
+
+def _configurar_log(consola: bool = True):
+    if log.handlers:
+        return
     log.setLevel(logging.INFO)
-    consola = logging.StreamHandler(sys.stdout)
-    consola.setFormatter(logging.Formatter("%(message)s"))
+    if consola and sys.stdout is not None:
+        manejador = logging.StreamHandler(sys.stdout)
+        manejador.setFormatter(logging.Formatter("%(message)s"))
+        log.addHandler(manejador)
     archivo = logging.FileHandler(LOG, encoding="utf-8")
     archivo.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.addHandler(consola)
     log.addHandler(archivo)
 
 
 # --- pasta de trabalho (hardlinks) --------------------------------------------
+
+def mesmo_disco() -> bool:
+    return (os.path.splitdrive(config.CARPETA_PARA_SUBIR)[0].lower()
+            == os.path.splitdrive(config.RAIZ_CLIPS)[0].lower())
+
 
 def ruta_enlace(fila) -> Path:
     # O Windows corta pontos/espaços no fim do nome de uma pasta ("R.E.P.O." -> "R.E.P.O").
@@ -93,6 +111,8 @@ def reconciliar_carpeta(con) -> tuple[int, int]:
 # --- configurar -------------------------------------------------------------
 
 def cmd_configurar(_args):
+    if sys.stdin is None:
+        raise SystemExit("Para configurar, abra o programa com clique duplo e use a aba Configurações.")
     atual = config.RAIZ_CLIPS
     print("Em qual pasta estão os seus clips? Cole o caminho completo (ex.: D:\\Vídeos\\Clips).")
     print("Dica: no Explorador, clique com o botão direito na pasta > Copiar como caminho.")
@@ -114,7 +134,7 @@ def cmd_configurar(_args):
     resposta = input(f"Apagar os originais depois de enviados? [{padrao}]: ").strip().lower()
     apagar = config.APAGAR_ORIGINAIS if not resposta else resposta in ("s", "sim")
 
-    config.salvar(pasta, apagar)
+    config.salvar(clips=pasta, apagar_originais=apagar)
     print(f"\nConfiguração salva em {config.CONFIG}")
     print(f"  Pasta dos clips:     {config.RAIZ_CLIPS}")
     print(f"  Pasta de trabalho:   {config.CARPETA_PARA_SUBIR}")
@@ -123,8 +143,11 @@ def cmd_configurar(_args):
 
 # --- escanear ---------------------------------------------------------------
 
-def cmd_escanear(_args):
-    con = estado.conectar()
+def escanear_clips(con):
+    """Lê a pasta de clips, atualiza a base e o manifesto.csv. Devolve (filas, omitidos, clips)."""
+    if not config.RAIZ_CLIPS.is_dir():
+        raise SystemExit(f"A pasta dos clips não foi encontrada: {config.RAIZ_CLIPS}\n"
+                         "Se ela fica num disco externo, confira se ele está conectado.")
     filas = {f["ruta"]: f for f in con.execute("SELECT * FROM videos")}
     en_youtube = {ruta: f for ruta, f in filas.items() if f["estado"] in (SUBIDO, EN_PLAYLIST)}
     # Originais já enviados que não estão mais no caminho (foram apagados, ou o programa mudou de PC):
@@ -165,7 +188,11 @@ def cmd_escanear(_args):
                         round(fila["tamano"] / 2**20, 1), fila["estado"], fila["ruta"]])
         for ruta, motivo, _ in omitidos:
             w.writerow(["", "", "", "", round(ruta.stat().st_size / 2**20, 1), f"ignorado: {motivo}", str(ruta)])
+    return filas, omitidos, clips
 
+
+def cmd_escanear(_args):
+    filas, omitidos, clips = escanear_clips(estado.conectar())
     por_playlist = defaultdict(lambda: [0, 0])
     for fila in filas:
         por_playlist[fila["playlist"]][0] += 1
@@ -186,11 +213,81 @@ def cmd_escanear(_args):
     print(f"\nDetalhes em {MANIFIESTO}")
 
 
+# --- renomear (pela janela) --------------------------------------------------
+
+CARACTERES_INVALIDOS = set('<>:"/\\|?*')
+
+
+def validar_nombre(ruta: Path, nombre_nuevo: str) -> str | None:
+    """Devolve o motivo se `nombre_nuevo` (sem extensão) não serve como nome de arquivo, ou None."""
+    if not nombre_nuevo.strip():
+        return "Escreva um nome."
+    if CARACTERES_INVALIDOS & set(nombre_nuevo):
+        return 'O Windows não aceita estes caracteres no nome:  < > : " / \\ | ? *'
+    if nombre_nuevo != nombre_nuevo.rstrip(". "):
+        return "O nome não pode terminar com ponto ou espaço."
+    if len(nombre_nuevo) > 150:
+        return "Nome muito comprido (máximo 150 letras)."
+    nuevo = ruta.with_name(nombre_nuevo + ruta.suffix)
+    if nuevo.exists() and nuevo.name.lower() != ruta.name.lower():
+        return "Já existe um arquivo com esse nome nessa pasta."
+    return None
+
+
+def renomear_clip(ruta: str, nombre_nuevo: str) -> str:
+    """Renomeia o arquivo de um clip que ainda não foi enviado (e as cópias idênticas dele).
+    Devolve o título que ele vai ter no YouTube."""
+    original = Path(ruta)
+    if motivo := validar_nombre(original, nombre_nuevo):
+        raise SystemExit(motivo)
+    nuevo = original.with_name(nombre_nuevo + original.suffix)
+    con = estado.conectar()
+    fila = con.execute("SELECT * FROM videos WHERE ruta = ?", (ruta,)).fetchone()
+    if not fila or fila["estado"] not in (PENDIENTE, ERROR):
+        raise SystemExit("Esse clip já está no YouTube (ou está sendo enviado agora): não dá mais para renomear.")
+    clip = escaneo.previa(original, nombre_nuevo, config.RAIZ_CLIPS)
+    ocupados = {t.casefold() for (t,) in con.execute("SELECT titulo FROM videos WHERE ruta != ?", (ruta,))}
+    escaneo.asignar_titulos([clip], ocupados)
+
+    try:
+        with con:  # se o arquivo não puder ser renomeado, a base volta como estava
+            cambiados = con.execute(
+                "UPDATE videos SET ruta = ?, juego = ?, playlist = ?, fecha = ?, titulo = ?, estado = ?, error = NULL "
+                "WHERE ruta = ? AND estado IN (?, ?)",
+                (str(nuevo), clip.juego, clip.playlist, clip.fecha.isoformat(), clip.titulo, PENDIENTE,
+                 ruta, PENDIENTE, ERROR),
+            ).rowcount
+            if not cambiados:
+                raise SystemExit("Esse clip começou a ser enviado agora: não dá mais para renomear.")
+            os.rename(original, nuevo)
+            con.execute("UPDATE copias SET ruta_principal = ? WHERE ruta_principal = ?", (str(nuevo), ruta))
+    except PermissionError:
+        raise SystemExit("Não deu para renomear: o clip está aberto em outro programa. Feche e tente de novo.")
+    except FileExistsError:
+        raise SystemExit("Já existe um arquivo com esse nome nessa pasta.")
+
+    # As cópias idênticas ganham o mesmo nome, para continuarem sendo reconhecidas como cópias.
+    for (copia,) in con.execute("SELECT ruta FROM copias WHERE ruta_principal = ?", (str(nuevo),)).fetchall():
+        copia, destino = Path(copia), Path(copia).with_name(nuevo.name)
+        if copia.exists() and not destino.exists():
+            try:
+                os.rename(copia, destino)
+            except OSError:
+                continue
+            with con:
+                con.execute("UPDATE copias SET ruta = ? WHERE ruta = ?", (str(destino), str(copia)))
+
+    if mesmo_disco():
+        quitar_enlace(ruta_enlace(fila))
+        crear_enlace(con.execute("SELECT * FROM videos WHERE ruta = ?", (str(nuevo),)).fetchone())
+    log.info("Renomeado: %s -> %s", original.name, nuevo.name)
+    return clip.titulo
+
+
 # --- preparar ---------------------------------------------------------------
 
 def cmd_preparar(_args):
-    if (os.path.splitdrive(config.CARPETA_PARA_SUBIR)[0].lower()
-            != os.path.splitdrive(config.RAIZ_CLIPS)[0].lower()):
+    if not mesmo_disco():
         raise SystemExit("A pasta de trabalho tem que estar no mesmo disco que os clips (hardlinks).")
     con = estado.conectar()
     creados, borrados = reconciliar_carpeta(con)
@@ -378,6 +475,32 @@ def cmd_sincronizar(_args):
 
 # --- enviar -----------------------------------------------------------------
 
+_candado = None
+
+
+def _bloquear_otra_ejecucion():
+    """Evita dois envios ao mesmo tempo (a janela, a tarefa diária ou o terminal)."""
+    import msvcrt
+    global _candado
+    archivo = open(LOCK, "w")
+    try:
+        msvcrt.locking(archivo.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        archivo.close()
+        raise SystemExit("Já tem outro envio rodando (talvez a tarefa diária). Espere ele terminar.")
+    _candado = archivo
+
+
+def _liberar_candado():
+    import msvcrt
+    global _candado
+    if _candado:
+        _candado.seek(0)
+        msvcrt.locking(_candado.fileno(), msvcrt.LK_UNLCK, 1)
+        _candado.close()
+        _candado = None
+
+
 def _siguiente_pendiente(con):
     # Do mais novo para o mais antigo (à mão convém ir ao contrário, assim não se cruzam).
     return con.execute("SELECT * FROM videos WHERE estado = ? ORDER BY fecha DESC, ruta DESC LIMIT 1",
@@ -396,35 +519,19 @@ def _agregar_a_su_playlist(con, yt, fila, video_id):
         log.info("  Não deu para adicionar à playlist agora (%s); tenta de novo ao sincronizar.", e)
 
 
-def _bloquear_otra_ejecucion():
-    """Evita dois 'enviar' ao mesmo tempo (é liberado sozinho quando o processo termina)."""
-    import msvcrt
-    global _candado
-    _candado = open(LOCK, "w")
-    try:
-        msvcrt.locking(_candado.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        raise SystemExit("Já tem outro 'enviar' rodando (talvez a tarefa diária). Espere ele terminar.")
+def _progreso(p: float):
+    if PARAR.is_set():
+        raise Interrumpido()
+    if AL_PROGRESAR:
+        AL_PROGRESAR(p)
+    else:
+        print(f"   {p:6.1%}", end="\r", flush=True)
 
 
-def cmd_subir(args):
+def subir(con, limite: int | None = None):
+    """Envia pela API até o limite do dia (ou até apertarem Parar). Precisa do candado."""
     from googleapiclient.errors import HttpError
     from youtube import LimiteAlcanzado
-
-    if not args.dry_run:
-        _bloquear_otra_ejecucion()
-    con = estado.conectar()
-    if args.reintentar_errores:
-        with con:
-            con.execute("UPDATE videos SET estado = ?, error = NULL WHERE estado = ?", (PENDIENTE, ERROR))
-
-    if args.dry_run:
-        filas = con.execute("SELECT * FROM videos WHERE estado = ? ORDER BY fecha DESC, ruta DESC LIMIT ?",
-                            (PENDIENTE, args.limite or LIMITE_SUBIDAS_DIA)).fetchall()
-        for f in filas:
-            print(f"{f['titulo']}  ->  playlist '{f['playlist']}'  ({f['tamano'] / 2**20:.0f} MB)")
-        print(f"\n{len(filas)} vídeos seriam enviados (simulação, nada foi enviado).")
-        return
 
     yt = _conectar_youtube(con)
     try:
@@ -433,14 +540,14 @@ def cmd_subir(args):
         log.warning("Cota geral esgotada: envia mesmo assim, as playlists são completadas amanhã.")
 
     cupo = LIMITE_SUBIDAS_DIA - estado.cuota_de_hoy(con)[1]
-    if args.limite:
-        cupo = min(cupo, args.limite)
+    if limite:
+        cupo = min(cupo, limite)
     if cupo <= 0:
-        log.info("Os %d envios pela API de hoje já foram usados. Rode de novo amanhã.", LIMITE_SUBIDAS_DIA)
+        log.info("Os %d envios pela API de hoje já foram usados. Continua amanhã.", LIMITE_SUBIDAS_DIA)
         return
 
     hechos = 0
-    while hechos < cupo and (fila := _siguiente_pendiente(con)):
+    while hechos < cupo and not PARAR.is_set() and (fila := _siguiente_pendiente(con)):
         original = Path(fila["ruta"])
         if not original.exists():
             estado.cambiar_estado(con, fila["ruta"], ERROR, error="o arquivo original não existe mais")
@@ -458,8 +565,7 @@ def cmd_subir(args):
         try:
             video_id = yt.subir_video(
                 original, fila["titulo"], f"Arquivo original: {original.name}",
-                datetime.fromisoformat(fila["fecha"]).astimezone().isoformat(),
-                lambda p: print(f"   {p:6.1%}", end="\r", flush=True),
+                datetime.fromisoformat(fila["fecha"]).astimezone().isoformat(), _progreso,
             )
         except LimiteAlcanzado as e:
             devolver(PENDIENTE)
@@ -470,10 +576,12 @@ def cmd_subir(args):
                 log.info("A cota diária da API acabou (%s); reinicia à meia-noite do horário do Pacífico "
                          "(4h ou 5h em Brasília).", e)
             break
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, Interrumpido) as e:
             devolver(PENDIENTE)
-            log.info("Interrompido à mão; o vídeo volta a ficar pendente.")
-            raise
+            log.info("Parado; o vídeo volta a ficar pendente.")
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            break
         except HttpError as e:
             estado.registrar_cuota(con, subidas=1)
             if e.resp.status == 400:  # problema deste arquivo em particular
@@ -506,20 +614,66 @@ def cmd_subir(args):
     except LimiteAlcanzado:
         pass
     log.info("Enviados pela API nesta execução: %d", hechos)
+
+
+def enviar_tudo():
+    """O botão "Enviar clips" da janela: lê a pasta, prepara a pasta de envio manual e envia."""
+    _bloquear_otra_ejecucion()
+    try:
+        con = estado.conectar()
+        filas, _, _ = escanear_clips(con)
+        log.info("Pasta lida: %d clips encontrados.", len(filas))
+        if mesmo_disco():
+            reconciliar_carpeta(con)
+        subir(con)
+    finally:
+        _liberar_candado()
+
+
+def cmd_subir(args):
+    con = estado.conectar()
+    if args.reintentar_errores:
+        with con:
+            con.execute("UPDATE videos SET estado = ?, error = NULL WHERE estado = ?", (PENDIENTE, ERROR))
+    if args.dry_run:
+        filas = con.execute("SELECT * FROM videos WHERE estado = ? ORDER BY fecha DESC, ruta DESC LIMIT ?",
+                            (PENDIENTE, args.limite or LIMITE_SUBIDAS_DIA)).fetchall()
+        for f in filas:
+            print(f"{f['titulo']}  ->  playlist '{f['playlist']}'  ({f['tamano'] / 2**20:.0f} MB)")
+        print(f"\n{len(filas)} vídeos seriam enviados (simulação, nada foi enviado).")
+        return
+    _bloquear_otra_ejecucion()
+    try:
+        subir(con, args.limite)
+    finally:
+        _liberar_candado()
     _imprimir_estado(con)
 
 
 # --- status -----------------------------------------------------------------
 
-def _imprimir_estado(con):
+def resumen() -> dict:
+    con = estado.conectar()
     conteo = dict(con.execute("SELECT estado, COUNT(*) FROM videos GROUP BY estado").fetchall())
-    total = sum(conteo.values())
-    listos = conteo.get(SUBIDO, 0) + conteo.get(EN_PLAYLIST, 0)
     unidades, subidas = estado.cuota_de_hoy(con)
-    print(f"\nProgresso: {listos}/{total} no canal ({conteo.get(EN_PLAYLIST, 0)} já na playlist)")
-    print(f"  pendentes: {conteo.get(PENDIENTE, 0)}   com erro: {conteo.get(ERROR, 0)}   "
-          f"sendo enviados pela API: {conteo.get(RESERVADO_API, 0)}")
-    print(f"  cota de hoje: {subidas}/{LIMITE_SUBIDAS_DIA} envios, {unidades}/{LIMITE_UNIDADES_DIA} unidades")
+    return {
+        "total": sum(conteo.values()),
+        "no_canal": conteo.get(SUBIDO, 0) + conteo.get(EN_PLAYLIST, 0),
+        "na_playlist": conteo.get(EN_PLAYLIST, 0),
+        "pendentes": conteo.get(PENDIENTE, 0),
+        "erros": conteo.get(ERROR, 0),
+        "enviando": conteo.get(RESERVADO_API, 0),
+        "envios_hoje": subidas,
+        "unidades_hoje": unidades,
+    }
+
+
+def _imprimir_estado(_con=None):
+    r = resumen()
+    print(f"\nProgresso: {r['no_canal']}/{r['total']} no canal ({r['na_playlist']} já na playlist)")
+    print(f"  pendentes: {r['pendentes']}   com erro: {r['erros']}   sendo enviados pela API: {r['enviando']}")
+    print(f"  cota de hoje: {r['envios_hoje']}/{LIMITE_SUBIDAS_DIA} envios, "
+          f"{r['unidades_hoje']}/{LIMITE_UNIDADES_DIA} unidades")
 
 
 def cmd_estado(_args):
@@ -539,13 +693,19 @@ def cmd_estado(_args):
 # --- tarefa agendada --------------------------------------------------------
 
 NOMBRE_TAREA = "Enviar clips para o YouTube"
+SIN_VENTANA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _powershell(script: str) -> None:
-    import subprocess
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True,
+                       creationflags=SIN_VENTANA)
     if r.returncode != 0:
         raise SystemExit(f"O PowerShell falhou:\n{r.stderr.strip()}")
+
+
+def tarea_instalada() -> bool:
+    r = subprocess.run(["schtasks", "/Query", "/TN", NOMBRE_TAREA], capture_output=True, creationflags=SIN_VENTANA)
+    return r.returncode == 0
 
 
 def cmd_instalar_tarea(_args):
@@ -563,7 +723,7 @@ def cmd_instalar_tarea(_args):
         Register-ScheduledTask -TaskName {q(NOMBRE_TAREA)} -Action $accion -Trigger $horarios -Settings $opciones `
             -Principal $usuario -Force | Out-Null
     """)
-    print(f"Tarefa '{NOMBRE_TAREA}' criada: roda 'enviar' todos os dias às 10:00 e às 22:00.")
+    print(f"Tarefa '{NOMBRE_TAREA}' criada: envia sozinho todos os dias às 10:00 e às 22:00.")
 
 
 def cmd_quitar_tarea(_args):
@@ -571,40 +731,35 @@ def cmd_quitar_tarea(_args):
     print(f"Tarefa '{NOMBRE_TAREA}' removida deste PC.")
 
 
-# --- menu (ao abrir o .exe com clique duplo) ------------------------------------
-
-OPCIONES_MENU = [
-    ("Ver o progresso", ["status"]),
-    ("Enviar agora (até o limite do dia)", ["enviar"]),
-    ("Sincronizar (detectar o que foi enviado à mão, playlists, apagar originais)", ["sincronizar"]),
-    ("Escanear a pasta de clips", ["escanear"]),
-    ("Preparar a pasta para envio manual", ["preparar"]),
-    ("Instalar a tarefa diária neste PC", ["instalar-tarefa"]),
-    ("Remover a tarefa diária deste PC", ["remover-tarefa"]),
-    ("Configurar (pasta dos clips e opções)", ["configurar"]),
-]
+# --- início -------------------------------------------------------------------
 
 # Comandos que não precisam da pasta dos clips configurada.
 SIN_CARPETA = {"configurar", "status", "instalar-tarefa", "remover-tarefa"}
 
 
-def _menu() -> list[str] | None:
-    print("Enviar clips para o YouTube\n")
-    if config.RAIZ_CLIPS is None:
-        print("Primeira vez: vamos configurar.\n")
-        cmd_configurar(None)
-        print("\nAgora use a opção 4 (Escanear) e depois a 5 (Preparar).\n")
-    for i, (texto, _) in enumerate(OPCIONES_MENU, 1):
-        print(f"  {i}. {texto}")
-    eleccion = input("\nEscolha uma opção (Enter para sair): ").strip()
-    if eleccion.isdigit() and 1 <= int(eleccion) <= len(OPCIONES_MENU):
-        return OPCIONES_MENU[int(eleccion) - 1][1]
-    return None
+def _preparar_consola():
+    """O .exe é de janela: sys.stdout é None. Se foi aberto de um terminal, escreve nele."""
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    if sys.stdout is not None:
+        if EMPAQUETADO and not sys.stdout.isatty():  # "| Out-Host": o PowerShell lê na página OEM
+            sys.stdout.reconfigure(encoding=f"cp{kernel32.GetOEMCP()}", errors="replace")
+        return
+    if kernel32.AttachConsole(-1):
+        codificacion = f"cp{kernel32.GetConsoleOutputCP()}"
+        sys.stdout = sys.stderr = open("CONOUT$", "w", encoding=codificacion, errors="replace")
+        print()
 
 
 def main():
+    if len(sys.argv) == 1:  # clique duplo: abre a janela
+        _configurar_log(consola=False)
+        import interface
+        interface.abrir(sys.modules[__name__])
+        return
+
+    _preparar_consola()
     _configurar_log()
-    desde_menu = len(sys.argv) == 1
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="comando", required=True)
     sub.add_parser("configurar", help="escolhe a pasta dos clips e as opções").set_defaults(func=cmd_configurar)
@@ -621,14 +776,11 @@ def main():
     sub.add_parser("status", help="resumo do progresso").set_defaults(func=cmd_estado)
     sub.add_parser("instalar-tarefa", help="cria a tarefa diária neste PC").set_defaults(func=cmd_instalar_tarea)
     sub.add_parser("remover-tarefa", help="apaga a tarefa diária deste PC").set_defaults(func=cmd_quitar_tarea)
-    argumentos = _menu() if desde_menu else None
-    if desde_menu and argumentos is None:
-        return
+    args = parser.parse_args()
     try:
-        args = parser.parse_args(argumentos)
         if args.comando not in SIN_CARPETA and config.RAIZ_CLIPS is None:
-            raise SystemExit("Falta configurar a pasta dos clips: use a opção Configurar do menu "
-                             "(ou o comando 'configurar').")
+            raise SystemExit("Falta configurar a pasta dos clips: abra o programa com clique duplo "
+                             "e escolha a pasta na aba Configurações.")
         args.func(args)
     except SystemExit as e:
         if isinstance(e.code, str):  # mensagem para o usuário: aparece uma vez e fica no log
@@ -640,9 +792,6 @@ def main():
     except Exception:
         log.exception("Erro inesperado")
         raise
-    finally:
-        if desde_menu:
-            input("\nPronto. Enter para fechar...")
 
 
 if __name__ == "__main__":
